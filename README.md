@@ -26,9 +26,12 @@ docker build -t nas-stream-backend .
 To run the Python backend as a docker container launch:
 
 ```
-docker run -p 8000:8000 -e MEDIA_ROOT=/media --mount type=bind,source="/mnt/nas/Vidéos/Films",target=/media, readonly nas-stream-backend
+docker run -p 8000:8000 \
+  -e LOG_LEVEL=TRACE \
+  --mount type=bind,source="/mnt/nas/Vidéos/Films",target=/media,readonly \
+  nas-stream-backend
 ```
-
+With LOG_LEVEL you can adjust verbosity of logs.
 
 
 
