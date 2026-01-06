@@ -1,5 +1,5 @@
 # nas-stream-
-API &amp; associated front to test several way to stream files from most used codecs (h265, h264, vp9, av1 etc...) with most used web videa protocol (HLS, DASH etc...).
+API &amp; associated front to test several way to stream files from most used codecs (h265, h264, vp9, av1 etc...) with most used web video protocol (HLS, DASH etc...).
 
 ## Backend
 I strongly advise to mount your smb repo the way described here to avoid parsing, streaming issues later:
