@@ -330,7 +330,7 @@ def ensure_hls_running(file_id: str) -> str:
             log.info(
                 "ensure_hls_running: using existing fresh playlist for id=%s", file_id
             )
-            return f"/hls/{file_id}/index.m3u8"
+            return f"/api/hls{file_id}/index.m3u8"
 
     with PROCS_LOCK:
         proc = PROCS.get(file_id)
@@ -340,7 +340,7 @@ def ensure_hls_running(file_id: str) -> str:
                 file_id,
                 proc.pid,
             )
-            return f"/hls/{file_id}/index.m3u8"
+            return f"/api/hls{file_id}/index.m3u8"
 
         # Clean any previous output (keep original logic)
         log.info(
@@ -441,7 +441,7 @@ def ensure_hls_running(file_id: str) -> str:
         PROCS[file_id] = p
         log.info("ensure_hls_running: ffmpeg started id=%s pid=%s", file_id, p.pid)
 
-    return f"/hls/{file_id}/index.m3u8"
+    return f"/api/hls{file_id}/index.m3u8"
 
 
 @app.on_event("startup")
@@ -476,7 +476,7 @@ def list_files():
     return list(FILES.values())
 
 
-@app.post("/api/stream/{file_id}/start")
+@app.post("/api/hls{file_id}/start")
 def start_stream(file_id: str):
     log.info("start_stream: file_id=%s", file_id)
     hls_url = ensure_hls_running(file_id)
@@ -484,7 +484,7 @@ def start_stream(file_id: str):
     return {"hls_url": hls_url}
 
 
-@app.post("/api/stream/{file_id}/stop")
+@app.post("/api/hls{file_id}/stop")
 def stop_stream(file_id: str):
     log.info("stop_stream: requested file_id=%s", file_id)
 

@@ -1,0 +1,34 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: nas_stream_backend
+    environment:
+      HLS_ROOT: /hls
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      HLS_TIME: ${HLS_TIME:-2}
+      HLS_LIST_SIZE: ${HLS_LIST_SIZE:-6}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Host media folder -> /media in container
+      - ${MEDIA_PATH}:/media:ro
+
+      # Persist generated HLS segments/playlists
+      - hls_data:/hls
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./front
+    container_name: nas_stream_frontend
+    environment:
+      VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8000}
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  hls_data:

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Hls from "hls.js";
 
-const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API = "";
 
 function groupByCodec(files) {
     const groups = {};
@@ -71,7 +71,7 @@ export default function App() {
         setHlsUrl(null);
 
         try {
-            const r = await fetch(`${API}/api/stream/${file.id}/start`, { method: "POST" });
+            const r = await fetch(`${API}/hls/stream/${file.id}/start`, { method: "POST" });
             if (!r.ok) throw new Error(`start: HTTP ${r.status}`);
             const data = await r.json();
             setHlsUrl(data.hls_url);
