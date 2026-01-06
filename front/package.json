@@ -1,0 +1,19 @@
+{
+    "name": "nas-stream-frontend",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build"
+    },
+    "dependencies": {
+        "hls.js": "^1.5.17",
+        "react": "^19.2.3",
+        "react-dom": "^19.2.3"
+    },
+    "devDependencies": {
+        "@vitejs/plugin-react": "^5.1.2",
+        "vite": "^7.3.0"
+    }
+}
