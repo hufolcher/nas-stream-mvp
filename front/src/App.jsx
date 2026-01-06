@@ -71,7 +71,7 @@ export default function App() {
         setHlsUrl(null);
 
         try {
-            const r = await fetch(`${API}/hls/stream/${file.id}/start`, { method: "POST" });
+            const r = await fetch(`${API}/api/stream/hls/${file.id}/start`, { method: "POST" });
             if (!r.ok) throw new Error(`start: HTTP ${r.status}`);
             const data = await r.json();
             setHlsUrl(data.hls_url);
