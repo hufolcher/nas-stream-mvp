@@ -63,16 +63,48 @@ FILES: Dict[str, Dict] = {}
 PROCS: Dict[str, subprocess.Popen] = {}
 PROCS_LOCK = threading.Lock()
 
-log.info("Process starting with config: MEDIA_ROOT=%s HLS_ROOT=%s HLS_TIME=%s HLS_LIST_SIZE=%s LOG_LEVEL=%s",
-         MEDIA_ROOT, HLS_ROOT, HLS_TIME, HLS_LIST_SIZE, LOG_LEVEL)
+# Scan progress (MVP)
+SCAN_LOCK = threading.Lock()
+SCAN_STATUS: Dict[str, object] = {
+    "state": "idle",  # idle | scanning | done | error
+    "started_at": None,  # float epoch seconds
+    "finished_at": None,  # float epoch seconds
+    "duration_s": None,  # float
+    "media_root": str(MEDIA_ROOT),
+    # counters
+    "scanned_paths": 0,  # number of paths visited by rglob
+    "file_candidates": 0,  # number of files seen
+    "accepted_media": 0,  # files with matching extension
+    "indexed": 0,  # number of entries added to found/FILES so far
+    "ffprobe_ok": 0,
+    "ffprobe_failed": 0,
+    # optional info
+    "last_path": None,
+    "last_error": None,
+    "codec_counts": {},  # dict codec->count (computed at end)
+}
+
+
+log.info(
+    "Process starting with config: MEDIA_ROOT=%s HLS_ROOT=%s HLS_TIME=%s HLS_LIST_SIZE=%s LOG_LEVEL=%s",
+    MEDIA_ROOT,
+    HLS_ROOT,
+    HLS_TIME,
+    HLS_LIST_SIZE,
+    LOG_LEVEL,
+)
 
 
 def ffprobe_video_info(path: Path) -> Dict:
     cmd = [
-        "ffprobe", "-v", "error",
-        "-print_format", "json",
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
         "-show_streams",
-        "-select_streams", "v:0",
+        "-select_streams",
+        "v:0",
         str(path),
     ]
     log.debug("ffprobe: executing for path=%s", path)
@@ -101,18 +133,52 @@ def stable_id_for_path(p: Path) -> str:
     st = p.stat()
     key = f"{p}|{st.st_size}|{int(st.st_mtime)}"
     file_id = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
-    log.trace("stable_id_for_path: path=%s size=%s mtime=%s id=%s",
-              p, st.st_size, int(st.st_mtime), file_id)
+    log.trace(
+        "stable_id_for_path: path=%s size=%s mtime=%s id=%s",
+        p,
+        st.st_size,
+        int(st.st_mtime),
+        file_id,
+    )
     return file_id
 
 
 def scan_files() -> None:
+    # Initialize scan status
+    with SCAN_LOCK:
+        SCAN_STATUS.update(
+            {
+                "state": "scanning",
+                "started_at": time.time(),
+                "finished_at": None,
+                "duration_s": None,
+                "media_root": str(MEDIA_ROOT),
+                "scanned_paths": 0,
+                "file_candidates": 0,
+                "accepted_media": 0,
+                "indexed": 0,
+                "ffprobe_ok": 0,
+                "ffprobe_failed": 0,
+                "last_path": None,
+                "last_error": None,
+                "codec_counts": {},
+            }
+        )
+
     global FILES
     log.info("scan_files: starting scan MEDIA_ROOT=%s", MEDIA_ROOT)
 
     if not MEDIA_ROOT.exists():
-        # keep your existing behavior (raise) but log it
         log.error("scan_files: MEDIA_ROOT does not exist: %s", MEDIA_ROOT)
+        with SCAN_LOCK:
+            SCAN_STATUS["state"] = "error"
+            SCAN_STATUS["finished_at"] = time.time()
+            SCAN_STATUS["duration_s"] = (
+                float(SCAN_STATUS["finished_at"]) - float(SCAN_STATUS["started_at"])
+                if SCAN_STATUS.get("started_at") is not None
+                else None
+            )
+            SCAN_STATUS["last_error"] = f"MEDIA_ROOT does not exist: {MEDIA_ROOT}"
         raise RuntimeError(f"MEDIA_ROOT does not exist: {MEDIA_ROOT}")
 
     start_ts = time.time()
@@ -123,34 +189,55 @@ def scan_files() -> None:
     accepted_media = 0
     ffprobe_ok = 0
     ffprobe_failed = 0
+    indexed = 0
 
     # Note: rglob over network mounts can be slow; log progress at DEBUG.
     for p in MEDIA_ROOT.rglob("*"):
         scanned_paths += 1
         log.debug("scan_files: visiting path=%s", p)
 
+        with SCAN_LOCK:
+            SCAN_STATUS["scanned_paths"] = scanned_paths
+            SCAN_STATUS["last_path"] = str(p)
+
         if not p.is_file():
             log.trace("scan_files: skip (not a file) path=%s", p)
             continue
 
         file_candidates += 1
+        with SCAN_LOCK:
+            SCAN_STATUS["file_candidates"] = file_candidates
+
         ext = p.suffix.lower()
         if ext not in SCAN_EXTS:
             log.trace("scan_files: skip (ext=%s not in SCAN_EXTS) path=%s", ext, p)
             continue
 
         accepted_media += 1
+        with SCAN_LOCK:
+            SCAN_STATUS["accepted_media"] = accepted_media
+
         file_id = stable_id_for_path(p)
 
         info: Dict
         try:
             info = ffprobe_video_info(p)
             ffprobe_ok += 1
+            with SCAN_LOCK:
+                SCAN_STATUS["ffprobe_ok"] = ffprobe_ok
         except Exception as e:
             ffprobe_failed += 1
             info = {"codec": "unknown", "error": str(e)}
-            # keep behavior: mark unknown; log at WARNING with details
-            log.warning("scan_files: ffprobe failed path=%s id=%s err=%s", p, file_id, e, exc_info=log.isEnabledFor(logging.DEBUG))
+            log.warning(
+                "scan_files: ffprobe failed path=%s id=%s err=%s",
+                p,
+                file_id,
+                e,
+                exc_info=log.isEnabledFor(logging.DEBUG),
+            )
+            with SCAN_LOCK:
+                SCAN_STATUS["ffprobe_failed"] = ffprobe_failed
+                SCAN_STATUS["last_error"] = f"{type(e).__name__}: {e}"
 
         record = {
             "id": file_id,
@@ -165,16 +252,36 @@ def scan_files() -> None:
         }
 
         found[file_id] = record
-        log.debug("scan_files: indexed id=%s codec=%s name=%s", file_id, record.get("codec"), record.get("name"))
+        indexed += 1
+        with SCAN_LOCK:
+            SCAN_STATUS["indexed"] = indexed
+
+        log.debug(
+            "scan_files: indexed id=%s codec=%s name=%s",
+            file_id,
+            record.get("codec"),
+            record.get("name"),
+        )
         log.trace("scan_files: record=%s", record)
 
     # preserve your sorting logic exactly
-    FILES = dict(sorted(found.items(), key=lambda kv: ((kv[1].get("codec") or ""), kv[1]["name"].lower())))
+    FILES = dict(
+        sorted(
+            found.items(),
+            key=lambda kv: ((kv[1].get("codec") or ""), kv[1]["name"].lower()),
+        )
+    )
 
     duration = time.time() - start_ts
     log.info(
         "scan_files: completed in %.2fs; scanned_paths=%d file_candidates=%d accepted_media=%d indexed=%d ffprobe_ok=%d ffprobe_failed=%d",
-        duration, scanned_paths, file_candidates, accepted_media, len(FILES), ffprobe_ok, ffprobe_failed
+        duration,
+        scanned_paths,
+        file_candidates,
+        accepted_media,
+        len(FILES),
+        ffprobe_ok,
+        ffprobe_failed,
     )
 
     # codec distribution (INFO)
@@ -182,7 +289,18 @@ def scan_files() -> None:
     for v in FILES.values():
         c = v.get("codec") or "unknown"
         codec_counts[c] = codec_counts.get(c, 0) + 1
-    log.info("scan_files: codec distribution=%s", dict(sorted(codec_counts.items(), key=lambda x: x[0])))
+    codec_counts_sorted = dict(sorted(codec_counts.items(), key=lambda x: x[0]))
+    log.info("scan_files: codec distribution=%s", codec_counts_sorted)
+
+    # Finalize scan status
+    finished_ts = time.time()
+    with SCAN_LOCK:
+        SCAN_STATUS["state"] = "done"
+        SCAN_STATUS["finished_at"] = finished_ts
+        SCAN_STATUS["duration_s"] = finished_ts - float(SCAN_STATUS["started_at"])
+        SCAN_STATUS["codec_counts"] = codec_counts_sorted
+        # Keep last_path as the last visited path; clear last_error only if you prefer:
+        # SCAN_STATUS["last_error"] = None
 
 
 def ensure_hls_running(file_id: str) -> str:
@@ -209,24 +327,39 @@ def ensure_hls_running(file_id: str) -> str:
         age = time.time() - playlist.stat().st_mtime
         log.debug("ensure_hls_running: playlist exists age=%.2fs", age)
         if age < 10:
-            log.info("ensure_hls_running: using existing fresh playlist for id=%s", file_id)
+            log.info(
+                "ensure_hls_running: using existing fresh playlist for id=%s", file_id
+            )
             return f"/hls/{file_id}/index.m3u8"
 
     with PROCS_LOCK:
         proc = PROCS.get(file_id)
         if proc and proc.poll() is None:
-            log.info("ensure_hls_running: ffmpeg already running id=%s pid=%s", file_id, proc.pid)
+            log.info(
+                "ensure_hls_running: ffmpeg already running id=%s pid=%s",
+                file_id,
+                proc.pid,
+            )
             return f"/hls/{file_id}/index.m3u8"
 
         # Clean any previous output (keep original logic)
-        log.info("ensure_hls_running: cleaning existing HLS output id=%s dir=%s", file_id, out_dir)
+        log.info(
+            "ensure_hls_running: cleaning existing HLS output id=%s dir=%s",
+            file_id,
+            out_dir,
+        )
         cleaned = 0
         for child in out_dir.glob("*"):
             try:
                 child.unlink()
                 cleaned += 1
             except Exception as e:
-                log.warning("ensure_hls_running: failed to delete %s err=%s", child, e, exc_info=log.isEnabledFor(logging.DEBUG))
+                log.warning(
+                    "ensure_hls_running: failed to delete %s err=%s",
+                    child,
+                    e,
+                    exc_info=log.isEnabledFor(logging.DEBUG),
+                )
         log.debug("ensure_hls_running: cleaned_files=%d id=%s", cleaned, file_id)
 
         seg_pattern = str(out_dir / "seg_%05d.ts")
@@ -236,42 +369,73 @@ def ensure_hls_running(file_id: str) -> str:
         cmd = [
             "ffmpeg",
             "-hide_banner",
-            "-loglevel", "warning",
+            "-loglevel",
+            "warning",
             "-re",
-            "-i", str(src),
-            "-map", "0:v:0",
-            "-map", "0:a?",
-
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "18",
-            "-tune", "zerolatency",
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "high",
-            "-level", "4.1",
-            "-g", "48",
-            "-keyint_min", "48",
-            "-sc_threshold", "0",
-
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-ac", "2",
-
-            "-f", "hls",
-            "-hls_time", str(HLS_TIME),
-            "-hls_list_size", str(HLS_LIST_SIZE),
-            "-hls_flags", "delete_segments+append_list",
-            "-hls_segment_filename", seg_pattern,
+            "-i",
+            str(src),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.1",
+            "-g",
+            "48",
+            "-keyint_min",
+            "48",
+            "-sc_threshold",
+            "0",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ac",
+            "2",
+            "-f",
+            "hls",
+            "-hls_time",
+            str(HLS_TIME),
+            "-hls_list_size",
+            str(HLS_LIST_SIZE),
+            "-hls_flags",
+            "delete_segments+append_list",
+            "-hls_segment_filename",
+            seg_pattern,
             str(playlist),
         ]
 
-        log.info("ensure_hls_running: starting ffmpeg id=%s src=%s -> %s", file_id, src, playlist)
+        log.info(
+            "ensure_hls_running: starting ffmpeg id=%s src=%s -> %s",
+            file_id,
+            src,
+            playlist,
+        )
         log.trace("ensure_hls_running: ffmpeg cmd=%s", cmd)
 
         try:
-            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            p = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
         except Exception as e:
-            log.error("ensure_hls_running: failed to start ffmpeg id=%s err=%s", file_id, e, exc_info=True)
+            log.error(
+                "ensure_hls_running: failed to start ffmpeg id=%s err=%s",
+                file_id,
+                e,
+                exc_info=True,
+            )
             raise
 
         PROCS[file_id] = p
@@ -289,7 +453,12 @@ def _startup():
 
 @app.get("/api/health")
 def health():
-    log.debug("health: MEDIA_ROOT=%s exists=%s files=%d", MEDIA_ROOT, MEDIA_ROOT.exists(), len(FILES))
+    log.debug(
+        "health: MEDIA_ROOT=%s exists=%s files=%d",
+        MEDIA_ROOT,
+        MEDIA_ROOT.exists(),
+        len(FILES),
+    )
     return {"ok": True, "media_root": str(MEDIA_ROOT), "count": len(FILES)}
 
 
@@ -331,9 +500,15 @@ def stop_stream(file_id: str):
             try:
                 proc.wait(timeout=3)
                 terminated = True
-                log.info("stop_stream: terminated ffmpeg file_id=%s pid=%s", file_id, pid)
+                log.info(
+                    "stop_stream: terminated ffmpeg file_id=%s pid=%s", file_id, pid
+                )
             except Exception:
-                log.warning("stop_stream: terminate timeout, killing ffmpeg file_id=%s pid=%s", file_id, pid)
+                log.warning(
+                    "stop_stream: terminate timeout, killing ffmpeg file_id=%s pid=%s",
+                    file_id,
+                    pid,
+                )
                 proc.kill()
                 terminated = True
         PROCS.pop(file_id, None)
@@ -343,5 +518,17 @@ def stop_stream(file_id: str):
         log.info("stop_stream: removing HLS dir file_id=%s dir=%s", file_id, out_dir)
         shutil.rmtree(out_dir, ignore_errors=True)
 
-    log.info("stop_stream: completed file_id=%s terminated=%s pid=%s", file_id, terminated, pid)
+    log.info(
+        "stop_stream: completed file_id=%s terminated=%s pid=%s",
+        file_id,
+        terminated,
+        pid,
+    )
     return {"stopped": True}
+
+
+@app.get("/api/scan/status")
+def scan_status():
+    with SCAN_LOCK:
+        # return a shallow copy to avoid mutation while serializing
+        return dict(SCAN_STATUS)
